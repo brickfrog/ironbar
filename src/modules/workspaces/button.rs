@@ -2,34 +2,47 @@ use super::open_state::OpenState;
 use crate::gtk_helpers::IronbarGtkExt;
 use crate::image::IconButton;
 use crate::modules::workspaces::WorkspaceItemContext;
+use crate::modules::workspaces::WorkspaceRequestMessage;
 use crate::try_send;
 use gtk::Button as GtkButton;
 use gtk::prelude::*;
 
-#[derive(Debug, Clone)]
+const WORKSPACE_ID_KEY: &str = "workspace-id";
+const WORKSPACE_NAME_KEY: &str = "workspace-name";
+
+#[derive(Debug)]
 pub struct Button {
     button: IconButton,
-    workspace_id: i64,
 }
 
 impl Button {
     pub fn new(id: i64, name: &str, open_state: OpenState, context: &WorkspaceItemContext) -> Self {
         let label = context.name_map.get(name).map_or(name, String::as_str);
-
         let button = IconButton::new(label, &context.icon_theme, context.icon_size);
         button.set_widget_name(name);
         button.add_class("item");
 
-        let tx = context.tx.clone();
+        // Store both the ID and name in the button
+        button.set_tag(WORKSPACE_ID_KEY, id);
+        button.set_tag(WORKSPACE_NAME_KEY, name.to_string());
 
-        button.connect_clicked(move |_item| {
-            try_send!(tx, id);
+        let tx = context.tx.clone();
+        button.connect_clicked(move |btn| {
+            // Get the current ID from the button
+            let id = btn.get_tag::<i64>(WORKSPACE_ID_KEY).copied().unwrap_or(-1);
+
+            // If this is a favorite with ID -1 (empty workspace), use the name instead
+            if id == -1 {
+                if let Some(name) = btn.get_tag::<String>(WORKSPACE_NAME_KEY) {
+                    try_send!(tx, WorkspaceRequestMessage::Name(name.clone()));
+                    return;
+                }
+            }
+
+            try_send!(tx, WorkspaceRequestMessage::Id(id));
         });
 
-        let btn = Self {
-            button,
-            workspace_id: id,
-        };
+        let btn = Self { button };
 
         btn.set_open_state(open_state);
         btn
@@ -68,10 +81,13 @@ impl Button {
     }
 
     pub fn workspace_id(&self) -> i64 {
-        self.workspace_id
+        self.button
+            .get_tag::<i64>(WORKSPACE_ID_KEY)
+            .copied()
+            .unwrap_or(-1)
     }
 
-    pub fn set_workspace_id(&mut self, id: i64) {
-        self.workspace_id = id;
+    pub fn set_workspace_id(&self, id: i64) {
+        self.button.set_tag(WORKSPACE_ID_KEY, id);
     }
 }

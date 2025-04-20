@@ -18,6 +18,13 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
+// Message from button to controller can be either workspace ID or workspace name
+#[derive(Debug, Clone)]
+pub enum WorkspaceRequestMessage {
+    Id(i64),
+    Name(String),
+}
+
 #[derive(Debug, Deserialize, Default, Clone, Copy, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -141,38 +148,44 @@ const fn default_icon_size() -> i32 {
     32
 }
 
-#[derive(Debug, Clone)]
 pub struct WorkspaceItemContext {
     name_map: HashMap<String, String>,
     icon_theme: IconTheme,
     icon_size: i32,
-    tx: mpsc::Sender<i64>,
+    tx: mpsc::Sender<WorkspaceRequestMessage>,
 }
 
-/// Re-orders the container children alphabetically,
-/// using their widget names.
-///
-/// Named workspaces are always sorted before numbered ones.
+/// Reorders the workspaces in the container
+/// to match the provided sort order.
 fn reorder_workspaces(container: &gtk::Box, sort_order: SortOrder) {
+    if sort_order == SortOrder::Added {
+        return;
+    }
+    // Get all children
     let mut buttons = container
         .children()
         .into_iter()
-        .map(|child| {
-            let label = if sort_order == SortOrder::Label {
-                child
-                    .downcast_ref::<gtk::Button>()
-                    .and_then(ButtonExt::label)
-                    .unwrap_or_else(|| child.widget_name())
-            } else {
-                child.widget_name()
+        .filter_map(|child| {
+            if sort_order == SortOrder::Label {
+                // Sort by the label text, visible to user
+                let button = child.downcast_ref::<gtk::Button>().unwrap();
+                if let Some(child) = button.child() {
+                    if let Some(label) = child.downcast_ref::<gtk::Label>() {
+                        return Some((label.text().to_string(), child));
+                    }
+                }
             }
-            .to_string();
 
-            (label, child)
+            // Sort by the workspace name (the internal id)
+            if !child.widget_name().is_empty() {
+                return Some((child.widget_name().to_string(), child));
+            }
+
+            None
         })
         .collect::<Vec<_>>();
 
-    buttons.sort_by(|(label_a, _), (label_b, _a)| {
+    buttons.sort_by(|(label_a, _), (label_b, _)| {
         match (label_a.parse::<i32>(), label_b.parse::<i32>()) {
             (Ok(a), Ok(b)) => a.cmp(&b),
             (Ok(_), Err(_)) => Ordering::Less,
@@ -188,7 +201,7 @@ fn reorder_workspaces(container: &gtk::Box, sort_order: SortOrder) {
 
 impl Module<gtk::Box> for WorkspacesModule {
     type SendMessage = WorkspaceUpdate;
-    type ReceiveMessage = i64;
+    type ReceiveMessage = WorkspaceRequestMessage;
 
     module_impl!("workspaces");
 
@@ -218,8 +231,24 @@ impl Module<gtk::Box> for WorkspacesModule {
         spawn(async move {
             trace!("Setting up UI event handler");
 
-            while let Some(id) = rx.recv().await {
-                client.focus(id);
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    WorkspaceRequestMessage::Id(id) => {
+                        client.focus(id);
+                    }
+                    WorkspaceRequestMessage::Name(name) => {
+                        // Try to parse the name as a number since most workspaces are numeric
+                        if let Ok(id) = name.parse::<i64>() {
+                            client.focus(id);
+                        } else {
+                            // For named workspaces or when parsing fails, log a warning
+                            // In most cases, numeric workspaces are all that's needed
+                            warn!(
+                                "Cannot focus workspace by name: {name} - implement if needed for non-numeric workspaces"
+                            );
+                        }
+                    }
+                }
             }
 
             Ok::<(), Report>(())
